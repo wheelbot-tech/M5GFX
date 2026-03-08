@@ -31,13 +31,23 @@ Contributors:
 #include <soc/lcd_cam_reg.h>
 #include <soc/lcd_cam_struct.h>
 
-#include <soc/gdma_channel.h>
+#if __has_include(<soc/gdma_channel.h>)
+ #include <soc/gdma_channel.h>
+#else
+ #include <hal/gdma_channel.h>
+#endif
 #include <soc/gdma_reg.h>
 #if !defined (DMA_OUT_LINK_CH0_REG)
   #define DMA_OUT_LINK_CH0_REG       GDMA_OUT_LINK_CH0_REG
   #define DMA_OUTFIFO_STATUS_CH0_REG GDMA_OUTFIFO_STATUS_CH0_REG
   #define DMA_OUTLINK_START_CH0      GDMA_OUTLINK_START_CH0
   #define DMA_OUTFIFO_EMPTY_CH0      GDMA_OUTFIFO_EMPTY_L3_CH0
+#endif
+#if !defined (gpio_matrix_out)
+  #define gpio_matrix_out(pin, signal_idx, out_inv, oen_inv) rom_gpio_matrix_out((pin), (signal_idx), (out_inv), (oen_inv))
+#endif
+#if !defined (gpio_pad_select_gpio)
+  #define gpio_pad_select_gpio(pin) rom_gpio_pad_select_gpio(pin)
 #endif
 
 #if ( ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 3, 0) )
@@ -85,12 +95,12 @@ namespace lgfx
     esp_lcd_i80_bus_config_t bus_config;
     memset(&bus_config, 0, sizeof(esp_lcd_i80_bus_config_t));
     bus_config.clk_src = lcd_clock_source_t::LCD_CLK_SRC_PLL160M; // IDFのバージョンによってenumの値が異なるので注意
-    bus_config.dc_gpio_num = _cfg.pin_rs;
-    bus_config.wr_gpio_num = _cfg.pin_wr;
+    bus_config.dc_gpio_num = (gpio_num_t)_cfg.pin_rs;
+    bus_config.wr_gpio_num = (gpio_num_t)_cfg.pin_wr;
     for (int i = 0; i < 8; ++i)
     {
-      bus_config.data_gpio_nums[i] = _cfg.pin_data[i];
-      bus_config.data_gpio_nums[i+8] = -1;
+      bus_config.data_gpio_nums[i] = (gpio_num_t)_cfg.pin_data[i];
+      bus_config.data_gpio_nums[i+8] = (gpio_num_t)-1;
     }
     bus_config.bus_width = 8;
     bus_config.max_transfer_bytes = 4092;

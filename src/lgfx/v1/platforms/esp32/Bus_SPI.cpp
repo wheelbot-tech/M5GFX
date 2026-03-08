@@ -58,12 +58,20 @@ Contributors:
    #include <rom/gpio.h> // dispatched by core
 #endif   
 
+#if !defined (gpio_matrix_out)
+ #define gpio_matrix_out(pin, signal_idx, out_inv, oen_inv) rom_gpio_matrix_out((pin), (signal_idx), (out_inv), (oen_inv))
+#endif
+
 #ifndef SPI_PIN_REG
  #define SPI_PIN_REG SPI_MISC_REG
 #endif
 
 #if defined (SOC_GDMA_SUPPORTED)  // for C3/C6/S3
- #include <soc/gdma_channel.h>
+ #if __has_include(<soc/gdma_channel.h>)
+  #include <soc/gdma_channel.h>
+ #else
+  #include <hal/gdma_channel.h>
+ #endif
  #if __has_include(<soc/gdma_reg.h>)
   #include <soc/gdma_reg.h>
  #elif __has_include(<soc/axi_dma_reg.h>) // ESP32P4
