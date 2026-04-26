@@ -33,7 +33,7 @@ Contributors:
 
 #if __has_include(<soc/gdma_channel.h>)
  #include <soc/gdma_channel.h>
-#else
+#elif __has_include(<hal/gdma_channel.h>)
  #include <hal/gdma_channel.h>
 #endif
 #include <soc/gdma_reg.h>
@@ -48,6 +48,14 @@ Contributors:
 #endif
 #if !defined (gpio_pad_select_gpio)
   #define gpio_pad_select_gpio(pin) rom_gpio_pad_select_gpio(pin)
+#endif
+
+#if defined (ESP_IDF_VERSION_VAL) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
+ #define LGFX_GPIO_PAD_SELECT(pin)      rom_gpio_pad_select_gpio((gpio_num_t)(pin))
+ #define LGFX_GPIO_MATRIX_OUT(pin, sig) rom_gpio_matrix_out((gpio_num_t)(pin), (sig), 0, 0)
+#else
+ #define LGFX_GPIO_PAD_SELECT(pin)      gpio_pad_select_gpio((gpio_num_t)(pin))
+ #define LGFX_GPIO_MATRIX_OUT(pin, sig) gpio_matrix_out((gpio_num_t)(pin), (sig), 0, 0)
 #endif
 
 #if ( ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 3, 0) )
@@ -84,13 +92,13 @@ namespace lgfx
     {
       int32_t pin = _cfg.pin_ctrl[i];
       if (pin < 0) { continue; }
-      gpio_pad_select_gpio(pin);
+      LGFX_GPIO_PAD_SELECT(pin);
       gpio_hi(pin);
       gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
     }
 
-    gpio_matrix_out(_cfg.pin_rs, LCD_DC_IDX, 0, 0);
-    gpio_matrix_out(_cfg.pin_wr, LCD_PCLK_IDX, 0, 0);
+    LGFX_GPIO_MATRIX_OUT(_cfg.pin_rs, LCD_DC_IDX);
+    LGFX_GPIO_MATRIX_OUT(_cfg.pin_wr, LCD_PCLK_IDX);
 
     esp_lcd_i80_bus_config_t bus_config;
     memset(&bus_config, 0, sizeof(esp_lcd_i80_bus_config_t));
@@ -158,7 +166,7 @@ namespace lgfx
       auto idx_base = LCD_DATA_OUT0_IDX;
       for (size_t i = 0; i < 8; ++i)
       {
-        gpio_matrix_out(pins[i], idx_base + i, 0, 0);
+        LGFX_GPIO_MATRIX_OUT(pins[i], idx_base + i);
       }
     }
   }
@@ -403,14 +411,14 @@ namespace lgfx
     wait();
     _init_pin(true);
     gpio_lo(_cfg.pin_rd);
-    gpio_matrix_out(_cfg.pin_rs, 0x100, 0, 0);
+    LGFX_GPIO_MATRIX_OUT(_cfg.pin_rs, 0x100);
   }
 
   void Bus_Parallel8::endRead(void)
   {
     gpio_hi(_cfg.pin_rd);
     _init_pin();
-    gpio_matrix_out(_cfg.pin_rs, LCD_DC_IDX, 0, 0);
+    LGFX_GPIO_MATRIX_OUT(_cfg.pin_rs, LCD_DC_IDX);
   }
 
   void Bus_Parallel8::_read_bytes(uint8_t* dst, uint32_t length)

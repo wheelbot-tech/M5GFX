@@ -23,6 +23,7 @@ Contributors:
 #include <algorithm>
 #include <string.h>
 #include <math.h>
+#include <type_traits>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -48,7 +49,7 @@ Contributors:
 #if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0))
  #if __has_include(<hal/i2c_ll.h>)
   #include <hal/i2c_ll.h>
-  #if defined ( i2c_ll_reset_register )
+  #if defined ( i2c_ll_reset_register ) || (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
    #if SOC_PERIPH_CLK_CTRL_SHARED
     #define I2C_CLOCK_SRC_ATOMIC() PERIPH_RCC_ATOMIC()
    #else
@@ -134,6 +135,9 @@ Contributors:
 #endif
 
 #if defined (SOC_GDMA_SUPPORTED)  // for C3/S3
+ #if __has_include(<hal/gdma_ll.h>)
+  #include <hal/gdma_ll.h>
+ #endif
  #if __has_include(<soc/gdma_reg.h>)
   #include <soc/gdma_reg.h>
  #elif __has_include(<soc/axi_dma_reg.h>) // ESP32P4
@@ -160,18 +164,13 @@ Contributors:
  #if !defined (SOC_GDMA_PAIRS_PER_GROUP_MAX)
   #if defined (SOC_GDMA_PAIRS_PER_GROUP)
    #define SOC_GDMA_PAIRS_PER_GROUP_MAX SOC_GDMA_PAIRS_PER_GROUP
+  #elif defined (GDMA_LL_PAIRS_PER_INST)
+   #define SOC_GDMA_PAIRS_PER_GROUP_MAX GDMA_LL_PAIRS_PER_INST
   #else
-   #define SOC_GDMA_PAIRS_PER_GROUP_MAX 1
+   #define SOC_GDMA_PAIRS_PER_GROUP_MAX 5
   #endif
  #endif
 #endif
-
-
-
-#if defined (CONFIG_IDF_TARGET_ESP32C6) || defined (CONFIG_IDF_TARGET_ESP32P4) || ( defined (CONFIG_IDF_TARGET_ESP32C3) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 2, 0) )
- #define LGFX_GPIO_IN_SEL_CFG_REG
-#endif
-
 
 
 namespace lgfx
@@ -185,13 +184,36 @@ namespace lgfx
   static __attribute__ ((always_inline)) inline volatile uint32_t* reg(uint32_t addr) { return (volatile uint32_t *)ETS_UNCACHED_ADDR(addr); }
 #pragma GCC diagnostic pop
 
+  // in_sel メンバーの存在を検出する型特性
+  template <typename T, typename = void>
+  struct has_func_sel : std::false_type {};
+
+  template <typename T>
+  struct has_func_sel<T, decltype(void(std::declval<T&>().func_sel))> : std::true_type {};
+
+  // func_sel が存在する場合
+  template <typename T>
+  static inline typename std::enable_if<has_func_sel<T>::value, uint32_t>::type
+  get_gpio_func_in_sel(T& cfg) { return cfg.func_sel; }
+
+  // func_sel が存在しない場合 (in_sel を使用)
+  template <typename T>
+  static inline typename std::enable_if<!has_func_sel<T>::value, uint32_t>::type
+  get_gpio_func_in_sel(T& cfg) { return cfg.in_sel; }
+
+  // func_sel が存在する場合
+  template <typename T>
+  static inline typename std::enable_if<has_func_sel<T>::value>::type
+  set_gpio_func_out_sel(T& cfg, uint32_t val) { cfg.func_sel = val; }
+
+  // func_sel が存在しない場合 (out_sel を使用)
+  template <typename T>
+  static inline typename std::enable_if<!has_func_sel<T>::value>::type
+  set_gpio_func_out_sel(T& cfg, uint32_t val) { cfg.out_sel = val; }
+
   static int search_pin_number(int peripheral_sig)
   {
-#if defined LGFX_GPIO_IN_SEL_CFG_REG
-    uint32_t result = GPIO.func_in_sel_cfg[peripheral_sig].in_sel;
-#else
-    uint32_t result = GPIO.func_in_sel_cfg[peripheral_sig].func_sel;
-#endif
+    uint32_t result = get_gpio_func_in_sel(GPIO.func_in_sel_cfg[peripheral_sig]);
     return (result < GPIO_NUM_MAX) ? result : -1;
   }
 
@@ -399,12 +421,7 @@ namespace lgfx
     auto gpio_en_reg = gpio_en_regs[((pin >> 5) << 1) + 1];
     *gpio_en_reg = 1u << (pin & 31);
 
-
-#if defined LGFX_GPIO_IN_SEL_CFG_REG
-    GPIO.func_out_sel_cfg[pin].out_sel = SIG_GPIO_OUT_IDX;
-#else
-    GPIO.func_out_sel_cfg[pin].func_sel = SIG_GPIO_OUT_IDX;
-#endif
+    set_gpio_func_out_sel(GPIO.func_out_sel_cfg[pin], SIG_GPIO_OUT_IDX);
   }
 
 //----------------------------------------------------------------------------
@@ -497,6 +514,7 @@ namespace lgfx
       case command_write_low:  gpio_lo(val); break;
       case command_write_high: gpio_hi(val); break;
       case command_delay:      delay(val); break;
+      case command_delay_usec: delayMicroseconds(val); break;
       default:
         if ((cmd >> 2) == (command_mode_output >> 2)) {
           pin_mode_t mode = pin_mode_t::output;
@@ -545,7 +563,13 @@ namespace lgfx
 #endif
 
 #if !defined (CONFIG_IDF_TARGET) || defined (CONFIG_IDF_TARGET_ESP32)
-    static constexpr int default_spi_host = VSPI_HOST;
+ #if defined (VSPI_HOST)
+   static constexpr int default_spi_host = VSPI_HOST;
+ #elif defined (SPI3_HOST)
+   static constexpr int default_spi_host = SPI3_HOST;
+ #else
+   static constexpr int default_spi_host = SPI2_HOST;
+ #endif
     static constexpr int spi_periph_num = 3;
 #else
     static constexpr int default_spi_host = SPI2_HOST;
@@ -865,6 +889,26 @@ namespace lgfx
  #define I2C_ACK_ERR_INT_RAW_M I2C_NACK_INT_RAW_M
 #endif
 
+#if !defined ( I2C_CLOCK_SRC_ATOMIC )
+  #if __cplusplus <= 201103L
+    #define LGFX_PERIPH_MODULE_T periph_module_t
+  #else
+    #define LGFX_PERIPH_MODULE_T auto
+  #endif
+
+    __attribute__ ((unused))
+        static LGFX_PERIPH_MODULE_T getPeriphModule(int num)
+    {
+#if SOC_I2C_NUM == 1 || defined CONFIG_IDF_TARGET_ESP32C6
+      return PERIPH_I2C0_MODULE;
+#else
+      return num == 0 ? PERIPH_I2C0_MODULE : PERIPH_I2C1_MODULE;
+#endif
+    }
+
+  #undef LGFX_PERIPH_MODULE_T
+#endif
+
     static i2c_dev_t* getDev(int num)
     {
 #if SOC_I2C_NUM == 1 || defined CONFIG_IDF_TARGET_ESP32C6
@@ -968,7 +1012,7 @@ namespace lgfx
     }
     static volatile uint32_t* getFifoAddr(int num)
     {
-#if defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
       return &(getDev(num)->data.val);
 #else
       return &(getDev(num)->fifo_data.val);
@@ -1018,7 +1062,7 @@ namespace lgfx
       void save_reg(i2c_dev_t* dev)
       {
         auto reg = (volatile uint32_t*)dev;
-#if defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
         auto fifo_reg = (volatile uint32_t*)(&dev->data);
 #else
         auto fifo_reg = (volatile uint32_t*)(&dev->fifo_data);
@@ -1033,7 +1077,7 @@ namespace lgfx
       void load_reg(i2c_dev_t* dev)
       {
         auto reg = (volatile uint32_t*)dev;
-#if defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
         auto fifo_reg = (volatile uint32_t*)(&dev->data);
 #else
         auto fifo_reg = (volatile uint32_t*)(&dev->fifo_data);
@@ -1089,7 +1133,9 @@ namespace lgfx
 #if __has_include(<driver/i2c_master.h>)
       if ((int8_t)pin_sda >= 0) {
         gpio_set_level(pin_sda, true);
-#if __has_include(<esp_private/gpio.h>)
+#if __has_include(<esp_private/gpio.h>) && defined (ESP_IDF_VERSION_VAL) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
+        (void)gpio_iomux_output(pin_sda, PIN_FUNC_GPIO);
+#elif __has_include(<esp_private/gpio.h>)
         gpio_iomux_output(pin_sda, PIN_FUNC_GPIO);
 #else
         gpio_iomux_out(pin_sda, PIN_FUNC_GPIO, false);
@@ -1101,7 +1147,9 @@ namespace lgfx
       }
       if ((int8_t)pin_scl >= 0) {
         gpio_set_level(pin_scl, true);
-#if __has_include(<esp_private/gpio.h>)
+#if __has_include(<esp_private/gpio.h>) && defined (ESP_IDF_VERSION_VAL) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
+        (void)gpio_iomux_output(pin_scl, PIN_FUNC_GPIO);
+#elif __has_include(<esp_private/gpio.h>)
         gpio_iomux_output(pin_scl, PIN_FUNC_GPIO);
 #else
         gpio_iomux_out(pin_scl, PIN_FUNC_GPIO, false);
@@ -1120,7 +1168,7 @@ namespace lgfx
     {
 #if defined ( CONFIG_IDF_TARGET_ESP32C3 )
       return dev->sr.rx_fifo_cnt;
-#elif defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#elif defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
       return dev->sr.rxfifo_cnt;
 #else
       return dev->status_reg.rx_fifo_cnt;
@@ -1211,7 +1259,7 @@ namespace lgfx
           uint32_t us;
 #if defined ( CONFIG_IDF_TARGET_ESP32C3 )
           uint32_t us_limit = (dev->scl_high_period.period + dev->scl_low_period.period + 16 ) * (1 + dev->sr.tx_fifo_cnt);
-#elif defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#elif defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
           uint32_t us_limit = (dev->scl_high_period.scl_high_period + dev->scl_low_period.scl_low_period + 16 ) * (1 + dev->sr.txfifo_cnt);
 #else
           uint32_t us_limit = (dev->scl_high_period.period + dev->scl_low_period.period + 16 ) * (1 + dev->status_reg.tx_fifo_cnt);
@@ -1230,7 +1278,7 @@ namespace lgfx
         dev->int_clr.val = int_raw.val;
 #if !defined (CONFIG_IDF_TARGET) || defined (CONFIG_IDF_TARGET_ESP32)
         if (!int_raw.end_detect || int_raw.ack_err)
-#elif defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#elif defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
         if (!int_raw.end_detect_int_raw || int_raw.nack_int_raw)
 #else
         if (!int_raw.end_detect || int_raw.nack)
@@ -1244,7 +1292,7 @@ namespace lgfx
 
       if (flg_stop || res.has_error())
       {
-#if defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
         if (res.has_error() || i2c_context[i2c_port].state == i2c_context_t::state_read || !int_raw.end_detect_int_raw)
 #else
         if (res.has_error() || i2c_context[i2c_port].state == i2c_context_t::state_read || !int_raw.end_detect)
@@ -1265,7 +1313,7 @@ namespace lgfx
           while (!(dev->int_raw.val & intmask_) && ((millis() - ms) < 14));
 #if !defined (CONFIG_IDF_TARGET) || defined (CONFIG_IDF_TARGET_ESP32)
           if (res.has_value() && dev->int_raw.ack_err)
-#elif defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#elif defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
           if (res.has_value() && dev->int_raw.nack_int_raw)
 #else
           if (res.has_value() && dev->int_raw.nack)
@@ -1542,7 +1590,7 @@ namespace lgfx
           cycle = (1<<10)-1;
         }
 
-#if defined (CONFIG_IDF_TARGET_ESP32S3) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined (CONFIG_IDF_TARGET_ESP32S3) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
         auto wait_high = scl_high_period >> 2;
         dev->scl_high_period.scl_high_period = scl_high_period - wait_high;
         dev->scl_high_period.scl_wait_high_period = wait_high;
@@ -1592,7 +1640,7 @@ namespace lgfx
       auto dev = getDev(i2c_port);
       i2c_context[i2c_port].lock();
 
-#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) ||  defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) ||  defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
       if (dev->sr.bus_busy)
 #else
       if (dev->status_reg.bus_busy)
@@ -1604,7 +1652,7 @@ namespace lgfx
         {
           taskYIELD();
         }
-#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) || defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) || defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
         while (dev->sr.bus_busy && micros() - ms < 128);
 #else
         while (dev->status_reg.bus_busy && micros() - ms < 128);
@@ -1621,7 +1669,7 @@ namespace lgfx
 #if defined ( CONFIG_IDF_TARGET_ESP32C3 )
       dev->timeout.time_out_value = 31;
       dev->timeout.time_out_en = 1;
-#elif defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#elif defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
       dev->to.time_out_value = 31;
       dev->to.time_out_en = 1;
 #else
@@ -1712,7 +1760,7 @@ namespace lgfx
       auto dev = getDev(i2c_port);
 
       size_t len = 0;
-#if defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
       uint32_t us_limit = ((dev->scl_high_period.scl_high_period + dev->scl_high_period.scl_wait_high_period + dev->scl_low_period.scl_low_period) << 1);
 #elif defined ( CONFIG_IDF_TARGET_ESP32C3 )
       uint32_t us_limit = ((dev->scl_high_period.period + dev->scl_low_period.period) << 1);
