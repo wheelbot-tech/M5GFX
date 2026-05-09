@@ -622,7 +622,11 @@ namespace lgfx
         buscfg.mosi_io_num = spi_mosi;
         buscfg.miso_io_num = spi_miso;
         buscfg.sclk_io_num = spi_sclk;
+#if defined (CONFIG_IDF_TARGET_ESP32S3) && defined (ESP_IDF_VERSION_VAL) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
+        buscfg.max_transfer_sz = 4096;
+#else
         buscfg.max_transfer_sz = 1;
+#endif
         buscfg.flags = SPICOMMON_BUSFLAG_MASTER;
         buscfg.intr_flags = 0;
 #if defined (ESP_IDF_VERSION_VAL)
@@ -644,7 +648,11 @@ namespace lgfx
         memset(&devcfg, 0, sizeof(devcfg));
         devcfg.clock_speed_hz = 10000000;
         devcfg.spics_io_num = -1;
+#if defined (CONFIG_IDF_TARGET_ESP32S3) && defined (ESP_IDF_VERSION_VAL) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
+        devcfg.flags = 0;
+#else
         devcfg.flags = SPI_DEVICE_3WIRE | SPI_DEVICE_HALFDUPLEX;
+#endif
         devcfg.queue_size = 1;
         if (ESP_OK != spi_bus_add_device(static_cast<spi_host_device_t>(spi_host), &devcfg, &_spi_dev_handle[spi_host])) {
           ESP_LOGW("LGFX", "Failed to spi_bus_add_device. ");
@@ -849,6 +857,26 @@ namespace lgfx
     {
       endTransaction(spi_host);
       gpio_hi(spi_cs);
+    }
+
+    cpp::result<void, error_t> transmit(int spi_host, const void* data, size_t length)
+    {
+      if (_spi_dev_handle[spi_host] == nullptr) {
+        return cpp::fail(error_t::unknown_err);
+      }
+
+      spi_transaction_t transaction;
+      memset(&transaction, 0, sizeof(transaction));
+      transaction.length = length << 3;
+      transaction.tx_buffer = data;
+
+      esp_err_t err = spi_device_polling_transmit(_spi_dev_handle[spi_host], &transaction);
+      if (ESP_OK != err) {
+        ESP_LOGW("LGFX", "spi_device_polling_transmit failed: %s len=%u host=%d",
+                 esp_err_to_name(err), (unsigned)length, spi_host);
+        return cpp::fail(error_t::unknown_err);
+      }
+      return {};
     }
 
     void writeBytes(int spi_host, const uint8_t* data, size_t len)

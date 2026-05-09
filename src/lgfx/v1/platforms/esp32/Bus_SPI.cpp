@@ -124,6 +124,10 @@ Contributors:
 
 #include <algorithm>
 
+#if defined (CONFIG_IDF_TARGET_ESP32S3) && defined (ESP_IDF_VERSION_VAL) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
+ #define LGFX_SPI_USE_IDF_POLLING_TRANSMIT
+#endif
+
 namespace lgfx
 {
  inline namespace v1
@@ -134,6 +138,24 @@ namespace lgfx
 #pragma GCC diagnostic ignored "-Warray-bounds"
   static __attribute__ ((always_inline)) inline void writereg(uint32_t addr, uint32_t value) { *(volatile uint32_t*)addr = value; }
 #pragma GCC diagnostic pop
+
+#if defined (LGFX_SPI_USE_IDF_POLLING_TRANSMIT)
+  static inline uint_fast8_t spi_pack_word(uint8_t* buf, uint32_t data, uint_fast8_t bit_length)
+  {
+    uint_fast8_t length = (bit_length + 7) >> 3;
+    for (uint_fast8_t i = 0; i < length; ++i) {
+      buf[i] = data >> (i << 3);
+    }
+    return length;
+  }
+
+  static inline void spi_repeat_pattern(uint8_t* dst, const uint8_t* pattern, uint_fast8_t pattern_length, uint32_t count)
+  {
+    for (uint32_t i = 0; i < count; ++i) {
+      memcpy(&dst[i * pattern_length], pattern, pattern_length);
+    }
+  }
+#endif
 
   void Bus_SPI::config(const config_t& cfg)
   {
@@ -181,7 +203,6 @@ namespace lgfx
 
   bool Bus_SPI::init(void)
   {
-//ESP_LOGI("LGFX","Bus_SPI::init");
     dc_control(true);
     pinMode(_cfg.pin_dc, pin_mode_t::output);
 
@@ -271,7 +292,12 @@ namespace lgfx
 
   void Bus_SPI::beginTransaction(void)
   {
-//ESP_LOGI("LGFX","Bus_SPI::beginTransaction");
+#if defined (LGFX_SPI_USE_IDF_POLLING_TRANSMIT)
+    dc_control(true);
+    pinMode(_cfg.pin_dc, pin_mode_t::output);
+    if (_cfg.use_lock) spi::beginTransaction(_cfg.spi_host);
+    return;
+#endif
     uint32_t freq_apb = getApbFrequency();
     uint32_t clkdiv_write = _clkdiv_write;
     if (_last_freq_apb != freq_apb)
@@ -344,7 +370,13 @@ namespace lgfx
 
   bool Bus_SPI::writeCommand(uint32_t data, uint_fast8_t bit_length)
   {
-//ESP_LOGI("LGFX","writeCmd: %02x  len:%d   dc:%02x", data, bit_length, _mask_reg_dc);
+#if defined (LGFX_SPI_USE_IDF_POLLING_TRANSMIT)
+    uint8_t buffer[4];
+    uint_fast8_t length = spi_pack_word(buffer, data, bit_length);
+    while (*_spi_cmd_reg & SPI_USR) {}
+    *_gpio_reg_dc[0] = _mask_reg_dc;
+    return spi::transmit(_cfg.spi_host, buffer, length).has_value();
+#endif
     --bit_length;
     auto spi_mosi_dlen_reg = _spi_mosi_dlen_reg;
     auto spi_w0_reg = _spi_w0_reg;
@@ -388,6 +420,14 @@ namespace lgfx
   void Bus_SPI::writeData(uint32_t data, uint_fast8_t bit_length)
   {
 //ESP_LOGI("LGFX","writeData: %02x  len:%d", data, bit_length);
+#if defined (LGFX_SPI_USE_IDF_POLLING_TRANSMIT)
+    uint8_t buffer[4];
+    uint_fast8_t length = spi_pack_word(buffer, data, bit_length);
+    while (*_spi_cmd_reg & SPI_USR) {}
+    *_gpio_reg_dc[1] = _mask_reg_dc;
+    spi::transmit(_cfg.spi_host, buffer, length);
+    return;
+#endif
     --bit_length;
     auto spi_mosi_dlen_reg = _spi_mosi_dlen_reg;
     auto spi_w0_reg = _spi_w0_reg;
@@ -428,6 +468,26 @@ namespace lgfx
 
   void Bus_SPI::writeDataRepeat(uint32_t data, uint_fast8_t bit_length, uint32_t count)
   {
+#if defined (LGFX_SPI_USE_IDF_POLLING_TRANSMIT)
+    uint8_t pattern[4];
+    uint_fast8_t pattern_length = spi_pack_word(pattern, data, bit_length);
+    uint8_t buffer[640];
+    uint32_t chunk_limit = sizeof(buffer) / pattern_length;
+
+    while (*_spi_cmd_reg & SPI_USR) {}
+    *_gpio_reg_dc[1] = _mask_reg_dc;
+    uint32_t chunks_sent = 0;
+    while (count) {
+      uint32_t chunk = (count < chunk_limit) ? count : chunk_limit;
+      spi_repeat_pattern(buffer, pattern, pattern_length, chunk);
+      spi::transmit(_cfg.spi_host, buffer, chunk * pattern_length);
+      count -= chunk;
+      if ((++chunks_sent & 0x0F) == 0) {
+        vTaskDelay(1);
+      }
+    }
+    return;
+#endif
     auto spi_mosi_dlen_reg = _spi_mosi_dlen_reg;
     auto spi_w0_reg = _spi_w0_reg;
     auto spi_cmd_reg = _spi_cmd_reg;
@@ -661,6 +721,18 @@ namespace lgfx
 
   void Bus_SPI::writeBytes(const uint8_t* data, uint32_t length, bool dc, bool use_dma)
   {
+#if defined (LGFX_SPI_USE_IDF_POLLING_TRANSMIT)
+    (void)use_dma;
+    while (*_spi_cmd_reg & SPI_USR) {}
+    dc_control(dc);
+    while (length) {
+      uint32_t chunk = (length < 4096) ? length : 4096;
+      spi::transmit(_cfg.spi_host, data, chunk);
+      data += chunk;
+      length -= chunk;
+    }
+    return;
+#endif
 #if defined LGFX_USE_QSPI
     if( _is_quad_spi)
     {

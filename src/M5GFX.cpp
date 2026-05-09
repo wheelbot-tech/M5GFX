@@ -12,6 +12,7 @@
 #include <driver/i2c.h>
 #include <soc/efuse_reg.h>
 #include <soc/gpio_reg.h>
+#include <soc/gpio_sig_map.h>
 
 #include "lgfx/v1/panel/Panel_ILI9342.hpp"
 #include "lgfx/v1/panel/Panel_SSD1306.hpp"
@@ -430,6 +431,8 @@ namespace m5gfx
 
   struct Panel_M5StackCoreS3 : public lgfx::Panel_ILI9342
   {
+    static constexpr uint8_t lcd_rst_bit = 1 << 1; // AW9523B P1_1
+
     Panel_M5StackCoreS3(void)
     {
       _cfg.pin_cs = GPIO_NUM_3;
@@ -439,11 +442,115 @@ namespace m5gfx
       _rotation = 1; // default rotation
     }
 
+    const uint8_t* getInitCommands(uint8_t listno) const override
+    {
+      static constexpr uint8_t list0[] =
+      {
+          CMD_SLPOUT, 0 + CMD_INIT_DELAY, 120,
+          CMD_DISPON, 0 + CMD_INIT_DELAY, 20,
+          CMD_INVON , 0,
+          CMD_COLMOD, 1, 0x55,
+          0xFF, 0xFF,
+      };
+      return listno ? nullptr : list0;
+    }
+
+    void writeCommand(uint32_t data, uint_fast8_t length) override
+    {
+      if (_cfg.dlen_16bit)
+      {
+        if (_has_align_data)
+        {
+          _has_align_data = false;
+          cs_control(false);
+          _bus->writeData(0, 8);
+          _bus->wait();
+          cs_control(true);
+        }
+        if (length == 1) { length = 2; data <<= 8; }
+      }
+      cs_control(false);
+      _bus->writeCommand(data, length << 3);
+      _bus->wait();
+      cs_control(true);
+    }
+
+    void writeData(uint32_t data, uint_fast8_t length) override
+    {
+      cs_control(false);
+      if (!_cfg.dlen_16bit)
+      {
+        _bus->writeData(data, length << 3);
+      }
+      else if (length == 1)
+      {
+        _bus->writeData(data << 8, 16);
+      }
+      else
+      {
+        _bus->writeData(data, length << 3);
+      }
+      _bus->wait();
+      cs_control(true);
+    }
+
+    void writeFillRectPreclipped(uint_fast16_t x, uint_fast16_t y, uint_fast16_t w, uint_fast16_t h, uint32_t rawcolor) override
+    {
+      uint32_t len = w * h;
+      uint_fast16_t xe = x + w - 1;
+      uint_fast16_t ye = y + h - 1;
+      static constexpr uint32_t mask = 0xFF00FF;
+      uint32_t x_range = x + (xe << 16);
+      uint32_t y_range = y + (ye << 16);
+
+      cs_control(false);
+      _bus->writeCommand(CMD_CASET, 8);
+      _bus->wait();
+      cs_control(true);
+      x_range += _colstart + (_colstart << 16);
+      cs_control(false);
+      _bus->writeData(((x_range >> 8) & mask) + ((x_range & mask) << 8), 32);
+      _bus->wait();
+      cs_control(true);
+
+      cs_control(false);
+      _bus->writeCommand(CMD_RASET, 8);
+      _bus->wait();
+      cs_control(true);
+      y_range += _rowstart + (_rowstart << 16);
+      cs_control(false);
+      _bus->writeData(((y_range >> 8) & mask) + ((y_range & mask) << 8), 32);
+      _bus->wait();
+      cs_control(true);
+
+      cs_control(false);
+      _bus->writeCommand(CMD_RAMWR, 8);
+      _bus->wait();
+      cs_control(true);
+
+      if (_cfg.dlen_16bit) { _has_align_data = (_write_bits & 15) && (len & 1); }
+      cs_control(false);
+      _bus->writeDataRepeat(rawcolor, _write_bits, len);
+      _bus->wait();
+      cs_control(true);
+    }
+
+    void writeBlock(uint32_t rawcolor, uint32_t len) override
+    {
+      cs_control(false);
+      _bus->writeDataRepeat(rawcolor, _write_bits, len);
+      _bus->wait();
+      cs_control(true);
+      if (_cfg.dlen_16bit && (_write_bits & 15) && (len & 1))
+      {
+        _has_align_data = !_has_align_data;
+      }
+    }
+
     void rst_control(bool level) override
     {
-      uint8_t bits = level ? (1<<5) : 0;
-      uint8_t mask = level ? ~0 : ~(1<<5);
-      // LCD_RST
+      uint8_t bits = level ? lcd_rst_bit : 0;
+      uint8_t mask = level ? 0xFF : ~lcd_rst_bit;
       lgfx::i2c::writeRegister8(i2c_port, aw9523_i2c_addr, 0x03, bits, mask, i2c_freq);
     }
 
@@ -453,7 +560,7 @@ namespace m5gfx
       // CS操作時にGPIO35の役割を切り替える (MISO or D/C);
 
       // FSPIQ_IN_IDX==FSPI MISO / SIG_GPIO_OUT_IDX==GPIO OUT
-      // *(volatile uint32_t*)GPIO_FUNC35_OUT_SEL_CFG_REG = flg ? FSPIQ_OUT_IDX : SIG_GPIO_OUT_IDX;
+      *(volatile uint32_t*)GPIO_FUNC35_OUT_SEL_CFG_REG = SIG_GPIO_OUT_IDX;
 
       // CS HIGHの場合はGPIO出力を無効化し、MISO入力として機能させる。
       // CS LOW の場合はGPIO出力を有効化し、D/Cとして機能させる。
@@ -511,14 +618,12 @@ namespace m5gfx
       if (brightness)
       {
         brightness = ((brightness + 641) >> 5);
-    // AXP2101 reg 0x90 = LDOS ON/OFF control
         lgfx::i2c::bitOn(i2c_port, axp_i2c_addr, 0x90, 0x80, i2c_freq); // DLDO1 enable
       }
       else
       {
         lgfx::i2c::bitOff(i2c_port, axp_i2c_addr, 0x90, 0x80, i2c_freq); // DLDO1 disable
       }
-    // AXP2101 reg 0x99 = DLDO1 voltage setting
       lgfx::i2c::writeRegister8(i2c_port, axp_i2c_addr, 0x99, brightness, 0, i2c_freq);
     }
   };
@@ -1331,9 +1436,6 @@ namespace m5gfx
       {
         lgfx::i2c::init(i2c_port, i2c_sda, i2c_scl);
 
-// ESP_LOGI("DEBUG","AW 0x10 :%02x", (int)lgfx::i2c::readRegister8(i2c_port, aw9523_i2c_addr, 0x10, 400000).value());
-// ESP_LOGI("DEBUG","AXP0x03 :%02x", (int)lgfx::i2c::readRegister8(i2c_port, axp_i2c_addr, 0x03, 400000).value());
-
         auto chk_axp = lgfx::i2c::readRegister8(i2c_port, axp_i2c_addr, 0x03, i2c_freq);
         if (chk_axp.has_value())
         {
@@ -1366,21 +1468,32 @@ namespace m5gfx
             m5gfx::i2c::writeRegister8(i2c_port, axp_i2c_addr, 0x94, 33 - 5); // ALDO3 set to 3.3v // for GC0308 Camera
             m5gfx::i2c::writeRegister8(i2c_port, axp_i2c_addr, 0x95, 33 - 5); // ALDO4 set to 3.3v // for TF card slot
 
+            // CoreS3 LCD reset is routed through AW9523 P1_1. With IDF 6,
+            // make the reset pulse explicit before SPI panel setup.
+            lgfx::i2c::writeRegister8(i2c_port, aw9523_i2c_addr, 0x03, 0, ~Panel_M5StackCoreS3::lcd_rst_bit, i2c_freq);
+            lgfx::delay(20);
+            lgfx::i2c::writeRegister8(i2c_port, aw9523_i2c_addr, 0x03, Panel_M5StackCoreS3::lcd_rst_bit, 0xFF, i2c_freq);
+            lgfx::delay(120);
+
             bus_cfg.pin_mosi = GPIO_NUM_37;
-            bus_cfg.pin_miso = GPIO_NUM_35;
+            bus_cfg.pin_miso = GPIO_NUM_NC;
             bus_cfg.pin_sclk = GPIO_NUM_36;
             bus_cfg.pin_dc   = GPIO_NUM_35;// MISOとLCD D/CをGPIO35でシェアしている;
+            bus_cfg.spi_host = SPI3_HOST;
             bus_cfg.spi_mode = 0;
-            bus_cfg.spi_3wire = true;
+            bus_cfg.spi_3wire = false;
             bus_spi->config(bus_cfg);
             bus_spi->init();
 
             _set_sd_spimode(bus_cfg.spi_host, GPIO_NUM_4);
 
-            id = _read_panel_id(bus_spi, GPIO_NUM_3);
-            if ((id & 0xFF) == 0xE3)
-            {  //  check panel (ILI9342)
-              board = board_t::board_M5StackCoreS3;
+            // IDF v6.0.1: _read_panel_id (RDDID 0x04 via SIO mode) fails because
+            // spi_bus_initialize now always connects MOSI as bidirectional input
+            // (gpio_matrix_input for spid_in), causing bus contention during SIO
+            // read phase. AXP2101@0x34 + AW9523@0x58 already uniquely identify
+            // CoreS3/CoreS3SE hardware, so SPI panel ID check is not needed.
+            board = board_t::board_M5StackCoreS3;
+            {
               // Camera GC0308 check (not found == M5StackCoreS3SE)
               auto chk_gc  = lgfx::i2c::readRegister8(i2c_port, gc0308_i2c_addr, 0x00, i2c_freq);
               if (chk_gc .has_value() && chk_gc .value() == 0x9b) {
@@ -1389,26 +1502,23 @@ namespace m5gfx
                 board = board_M5StackCoreS3SE;
                 ESP_LOGI(LIBRARY_NAME, "[Autodetect] board_M5StackCoreS3SE");
               }
-              bus_cfg.freq_write = 40000000;
-              bus_cfg.freq_read  = 16000000;
-              bus_spi->config(bus_cfg);
-              auto p = new Panel_M5StackCoreS3();
-              p->bus(bus_spi);
-              _panel_last.reset(p);
-
-              _set_backlight(new Light_M5StackCoreS3());
-
-              {
-                auto t = new Touch_M5StackCoreS3();
-                _touch_last.reset(t);
-                _panel_last->touch(t);
-              }
-
-              goto init_clear;
             }
-            bus_spi->release();
-            lgfx::pinMode(GPIO_NUM_4, lgfx::pin_mode_t::input); // TF card CS
-            lgfx::pinMode(GPIO_NUM_3, lgfx::pin_mode_t::input); // LCD CS
+            bus_cfg.freq_write = 10000000;
+            bus_cfg.freq_read  = 10000000;
+            bus_spi->config(bus_cfg);
+            auto p = new Panel_M5StackCoreS3();
+            p->bus(bus_spi);
+            _panel_last.reset(p);
+
+            _set_backlight(new Light_M5StackCoreS3());
+
+            {
+              auto t = new Touch_M5StackCoreS3();
+              _touch_last.reset(t);
+              _panel_last->touch(t);
+            }
+
+            goto init_clear;
           }
         }
         lgfx::i2c::release(i2c_port);

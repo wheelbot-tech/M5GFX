@@ -345,6 +345,7 @@ protected:
     cpp::result<void, error_t> initQuad(int spi_host, int spi_sclk, int spi_io0, int spi_io1, int spi_io2, int spi_io3, int dma_channel);
 #endif
     void beginTransaction(int spi_host);
+    cpp::result<void, error_t> transmit(int spi_host, const void* data, size_t length);
   }
 
 //----------------------------------------------------------------------------
